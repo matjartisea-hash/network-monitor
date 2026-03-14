@@ -390,7 +390,7 @@ def build_dashboard():
 </div>"""
     total = len(devices)
     empty = '<div class="empty">لا يوجد أجهزة بعد — ستُضاف تلقائياً عند أول إشعار من Dude ⏳</div>' if not devices else ""
-    html  = HTML.replace("{{now}}",   datetime.now().strftime("%H:%M:%S"))
+    html  = HTML.replace("{{now}}",   datetime.now().strftime("%I:%M:%S %p"))
     html  = html.replace("{{total}}", str(total))
     html  = html.replace("{{up}}",    str(total - down_cnt))
     html  = html.replace("{{down}}",  str(down_cnt))
@@ -438,10 +438,10 @@ def webhook():
 
     if event == "down":
         db_open_outage(device, dev_ip)
-        send(f"🚨 *انقطاع!*\n\n📡 *{device}*  |  `{dev_ip}`\n📍 {dev_loc or '—'}\n💬 {message or 'Link Down'}\n🕒 {datetime.now().strftime('%H:%M:%S')}")
+        send(f"🚨 *انقطاع!*\n\n📡 *{device}*  |  `{dev_ip}`\n📍 {dev_loc or '—'}\n💬 {message or 'Link Down'}\n🕒 {datetime.now().strftime('%I:%M:%S %p')}")
     else:
         secs = db_close_outage(device)
-        send(f"✅ *عاد للاتصال!*\n\n📡 *{device}*  |  `{dev_ip}`\n📍 {dev_loc or '—'}\n⏱ مدة الانقطاع: *{fmt_dur(secs)}*\n🕒 {datetime.now().strftime('%H:%M:%S')}")
+        send(f"✅ *عاد للاتصال!*\n\n📡 *{device}*  |  `{dev_ip}`\n📍 {dev_loc or '—'}\n⏱ مدة الانقطاع: *{fmt_dur(secs)}*\n🕒 {datetime.now().strftime('%I:%M:%S %p')}")
 
     return jsonify({"ok": True})
 
@@ -480,7 +480,7 @@ scheduler.add_job(report_weekly,  'cron', day_of_week='fri', hour=9, minute=0)
 scheduler.add_job(report_monthly, 'cron', day=1, hour=8, minute=0)
 scheduler.start()
 
-send(f"🚀 *النظام يعمل على Render.com*\n\n🔗 جاهز لاستقبال إشعارات Dude\n📱 الأجهزة تُضاف تلقائياً\n🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+send(f"🚀 *النظام يعمل على Render.com*\n\n🔗 جاهز لاستقبال إشعارات Dude\n📱 الأجهزة تُضاف تلقائياً\n🕒 {datetime.now().strftime('%Y-%m-%d %I:%M:%S %p')}")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
