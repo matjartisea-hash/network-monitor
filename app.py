@@ -407,9 +407,13 @@ app = Flask(__name__)
 def dashboard():
     return build_dashboard()
 
-@app.route("/webhook", methods=["POST"])
+@app.route("/webhook", methods=["POST", "GET"])
 def webhook():
-    data = request.json or {}
+    if request.json:
+        data = request.json
+    else:
+        data = request.args.to_dict()
+        data.update(request.form.to_dict())
 
     # أوامر تيليغرام
     if "update_id" in data:
