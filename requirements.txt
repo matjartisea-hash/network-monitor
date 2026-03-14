@@ -1,0 +1,4 @@
+flask==3.0.3
+python-telegram-bot==21.3
+schedule==1.2.2
+gunicorn==22.0.0
