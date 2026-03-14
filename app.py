@@ -409,11 +409,19 @@ def dashboard():
 
 @app.route("/webhook", methods=["POST", "GET"])
 def webhook():
-    if request.json:
-        data = request.json
-    else:
+    try:
+        data = request.json or {}
+    except:
+        data = {}
+    if not data:
         data = request.args.to_dict()
         data.update(request.form.to_dict())
+    if not data:
+        raw = request.get_data(as_text=True)
+        for item in raw.split("&"):
+            if "=" in item:
+                k, v = item.split("=", 1)
+                data[k.strip()] = v.strip()
 
     # أوامر تيليغرام
     if "update_id" in data:
