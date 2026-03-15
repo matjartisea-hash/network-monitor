@@ -95,6 +95,17 @@ def init_db():
             rx_bytes INTEGER DEFAULT 0,
             tx_bytes INTEGER DEFAULT 0
         );
+        CREATE TABLE IF NOT EXISTS hotspot_users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recorded_at TEXT NOT NULL,
+            username TEXT NOT NULL,
+            mac TEXT NOT NULL DEFAULT '',
+            ip TEXT NOT NULL DEFAULT '',
+            rx_bytes INTEGER DEFAULT 0,
+            tx_bytes INTEGER DEFAULT 0,
+            uptime TEXT DEFAULT '',
+            profile TEXT DEFAULT ''
+        );
     """)
     db.commit()
     db.close()
@@ -278,6 +289,160 @@ def get_best_sales_day():
     row = db.execute("SELECT MAX(total_sales) FROM daily_sales").fetchone()
     db.close()
     return row[0] or 0
+
+
+# ══════════════════════════════════════════
+#  بيانات المستخدمين النشطين
+# ══════════════════════════════════════════
+def save_user_stats(data):
+    db = get_db()
+    db.execute("""
+        INSERT INTO hotspot_users (recorded_at,username,mac,ip,rx_bytes,tx_bytes,uptime,profile)
+        VALUES (?,?,?,?,?,?,?,?)
+    """, (
+        _now(),
+        data.get("username",""),
+        data.get("mac",""),
+        data.get("ip",""),
+        int(data.get("rx",0)),
+        int(data.get("tx",0)),
+        data.get("uptime",""),
+        data.get("profile",""),
+    ))
+    db.commit()
+    db.close()
+
+def get_top_users(limit=10):
+    """أكثر المستخدمين استهلاكاً اليوم بالاعتماد على MAC"""
+    db  = get_db()
+    today = _today()
+    rows = db.execute("""
+        SELECT mac, username, profile,
+               MAX(rx_bytes) - MIN(rx_bytes) as rx_today,
+               MAX(tx_bytes) - MIN(tx_bytes) as tx_today,
+               MAX(rx_bytes+tx_bytes) - MIN(rx_bytes+tx_bytes) as total_today
+        FROM hotspot_users
+        WHERE recorded_at LIKE ? AND mac != ''
+        GROUP BY mac
+        ORDER BY total_today DESC
+        LIMIT ?
+    """, (f"{today}%", limit)).fetchall()
+    db.close()
+    return rows
+
+def get_top_devices(limit=10):
+    """أكثر الأجهزة استهلاكاً اليوم"""
+    db = get_db()
+    today = _today()
+    rows = db.execute("""
+        SELECT ip, username,
+               MAX(rx_bytes) - MIN(rx_bytes) as rx_today,
+               MAX(tx_bytes) - MIN(tx_bytes) as tx_today,
+               MAX(rx_bytes+tx_bytes) - MIN(rx_bytes+tx_bytes) as total_today
+        FROM hotspot_users
+        WHERE recorded_at LIKE ? AND ip != ''
+        GROUP BY ip
+        ORDER BY total_today DESC
+        LIMIT ?
+    """, (f"{today}%", limit)).fetchall()
+    db.close()
+    return rows
+
+def report_top_users():
+    users = get_top_users(10)
+    if not users:
+        send("لا توجد بيانات مستخدمين بعد ⏳
+انتظر 5 دقائق حتى يرسل السكريبت البيانات")
+        return
+    msg = f"👑 *أكثر المستخدمين استهلاكاً اليوم*
+📅 {_today()}
+{'━'*25}
+
+"
+    medals = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+    for i, row in enumerate(users):
+        total = row["total_today"] or 0
+        rx    = row["rx_today"] or 0
+        tx    = row["tx_today"] or 0
+        medal = medals[i] if i < 10 else f"{i+1}."
+        msg  += f"{medal} *{row['username']}*
+"
+        msg  += f"   📱 MAC: `{row['mac']}`
+"
+        msg  += f"   📦 الإجمالي: *{fmt_bytes(total)}*
+"
+        msg  += f"   ⬇️ {fmt_bytes(rx)}  ⬆️ {fmt_bytes(tx)}
+
+"
+    send(msg)
+
+def report_top_devices():
+    devices = get_top_devices(10)
+    if not devices:
+        send("لا توجد بيانات أجهزة بعد ⏳")
+        return
+    msg = f"📶 *أكثر الأجهزة استهلاكاً اليوم*
+📅 {_today()}
+{'━'*25}
+
+"
+    medals = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+    for i, row in enumerate(devices):
+        total = row["total_today"] or 0
+        rx    = row["rx_today"] or 0
+        tx    = row["tx_today"] or 0
+        medal = medals[i] if i < 10 else f"{i+1}."
+        # تقييم السرعة
+        if total > 5*1024**3:     speed = "🔴 مرتفع جداً"
+        elif total > 2*1024**3:   speed = "🟠 مرتفع"
+        elif total > 500*1024**2: speed = "🟡 متوسط"
+        else:                      speed = "🟢 منخفض"
+        msg  += f"{medal} `{row['ip']}` — *{row['username']}*
+"
+        msg  += f"   📦 {fmt_bytes(total)}  {speed}
+"
+        msg  += f"   ⬇️ {fmt_bytes(rx)}  ⬆️ {fmt_bytes(tx)}
+
+"
+    send(msg)
+
+def report_wan():
+    stats = get_latest_stats()
+    if not stats:
+        send("لا توجد بيانات شبكة بعد ⏳")
+        return
+    rx1 = stats.get("rx_ppp1", 0)
+    tx1 = stats.get("tx_ppp1", 0)
+    rx2 = stats.get("rx_ppp2", 0)
+    tx2 = stats.get("tx_ppp2", 0)
+    rx_t = stats.get("rx_intr1", 0)
+    tx_t = stats.get("tx_intr1", 0)
+    msg = (
+        f"🌐 *حالة الخطوط*
+{'━'*25}
+
+"
+        f"📡 *WAN1 (pppoe-out1):*
+"
+        f"   ⬇️ {fmt_bytes(rx1)}  ⬆️ {fmt_bytes(tx1)}
+
+"
+        f"📡 *WAN2 (pppoe-out2):*
+"
+        f"   ⬇️ {fmt_bytes(rx2)}  ⬆️ {fmt_bytes(tx2)}
+
+"
+        f"{'━'*25}
+"
+        f"📊 *الإجمالي (intr1):*
+"
+        f"   ⬇️ التحميل: *{fmt_bytes(rx_t)}*
+"
+        f"   ⬆️ الرفع: *{fmt_bytes(tx_t)}*
+"
+        f"   📦 المجموع: *{fmt_bytes(rx_t+tx_t)}*"
+    )
+    send(msg)
 
 
 # ══════════════════════════════════════════
@@ -513,6 +678,9 @@ def handle_bot(update):
                  "🔹 /devices — قائمة الأجهزة\n"
                  "🔹 /stats — إحصائيات الشبكة\n"
                  "🔹 /sales — تقرير المبيعات\n"
+                 "🔹 /topusers — أكثر المستخدمين استهلاكاً\n"
+                 "🔹 /topdevices — أكثر الأجهزة استهلاكاً\n"
+                 "🔹 /wan — حالة الخطوط\n"
                  "🔹 /daily — تقرير اليوم\n"
                  "🔹 /weekly — تقرير الأسبوع\n"
                  "🔹 /monthly — تقرير الشهر")
@@ -784,6 +952,12 @@ def receive_stats():
     if data.get("secret") != WEBHOOK_SECRET:
         return jsonify({"error": "unauthorized"}), 401
 
+    # بيانات مستخدم فردي
+    if data.get("type") == "user":
+        save_user_stats(data)
+        return jsonify({"ok": True})
+
+    # إحصائيات عامة
     save_stats(data)
     return jsonify({"ok": True})
 
