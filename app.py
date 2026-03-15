@@ -351,65 +351,52 @@ def get_top_devices(limit=10):
 def report_top_users():
     users = get_top_users(10)
     if not users:
-        send("لا توجد بيانات مستخدمين بعد ⏳
-انتظر 5 دقائق حتى يرسل السكريبت البيانات")
+        send("لا توجد بيانات بعد - انتظر 5 دقائق")
         return
-    msg = f"👑 *أكثر المستخدمين استهلاكاً اليوم*
-📅 {_today()}
-{'━'*25}
-
-"
+    sep = "━" * 25
+    msg = f"👑 *أكثر المستخدمين استهلاكاً اليوم*\n📅 {_today()}\n{sep}\n\n"
     medals = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
     for i, row in enumerate(users):
         total = row["total_today"] or 0
         rx    = row["rx_today"] or 0
         tx    = row["tx_today"] or 0
-        medal = medals[i] if i < 10 else f"{i+1}."
-        msg  += f"{medal} *{row['username']}*
-"
-        msg  += f"   📱 MAC: `{row['mac']}`
-"
-        msg  += f"   📦 الإجمالي: *{fmt_bytes(total)}*
-"
-        msg  += f"   ⬇️ {fmt_bytes(rx)}  ⬆️ {fmt_bytes(tx)}
-
-"
+        medal = medals[i] if i < 10 else str(i+1) + "."
+        uname = row["username"]
+        mac   = row["mac"]
+        msg  += medal + " *" + uname + "*\n"
+        msg  += "   📱 MAC: `" + mac + "`\n"
+        msg  += "   📦 الاجمالي: *" + fmt_bytes(total) + "*\n"
+        msg  += "   ⬇️ " + fmt_bytes(rx) + "  ⬆️ " + fmt_bytes(tx) + "\n\n"
     send(msg)
 
 def report_top_devices():
     devices = get_top_devices(10)
     if not devices:
-        send("لا توجد بيانات أجهزة بعد ⏳")
+        send("لا توجد بيانات اجهزة بعد")
         return
-    msg = f"📶 *أكثر الأجهزة استهلاكاً اليوم*
-📅 {_today()}
-{'━'*25}
-
-"
+    sep = "━" * 25
+    msg = "📶 *اكثر الاجهزة استهلاكا اليوم*\n📅 " + _today() + "\n" + sep + "\n\n"
     medals = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
     for i, row in enumerate(devices):
         total = row["total_today"] or 0
         rx    = row["rx_today"] or 0
         tx    = row["tx_today"] or 0
-        medal = medals[i] if i < 10 else f"{i+1}."
-        # تقييم السرعة
+        medal = medals[i] if i < 10 else str(i+1) + "."
         if total > 5*1024**3:     speed = "🔴 مرتفع جداً"
         elif total > 2*1024**3:   speed = "🟠 مرتفع"
         elif total > 500*1024**2: speed = "🟡 متوسط"
         else:                      speed = "🟢 منخفض"
-        msg  += f"{medal} `{row['ip']}` — *{row['username']}*
-"
-        msg  += f"   📦 {fmt_bytes(total)}  {speed}
-"
-        msg  += f"   ⬇️ {fmt_bytes(rx)}  ⬆️ {fmt_bytes(tx)}
-
-"
+        ip_addr = row["ip"]
+        uname   = row["username"]
+        msg += medal + " `" + ip_addr + "` - *" + uname + "*\n"
+        msg += "   📦 " + fmt_bytes(total) + "  " + speed + "\n"
+        msg += "   ⬇️ " + fmt_bytes(rx) + "  ⬆️ " + fmt_bytes(tx) + "\n\n"
     send(msg)
 
 def report_wan():
     stats = get_latest_stats()
     if not stats:
-        send("لا توجد بيانات شبكة بعد ⏳")
+        send("لا توجد بيانات شبكة بعد")
         return
     rx1 = stats.get("rx_ppp1", 0)
     tx1 = stats.get("tx_ppp1", 0)
@@ -417,37 +404,20 @@ def report_wan():
     tx2 = stats.get("tx_ppp2", 0)
     rx_t = stats.get("rx_intr1", 0)
     tx_t = stats.get("tx_intr1", 0)
-    msg = (
-        f"🌐 *حالة الخطوط*
-{'━'*25}
-
-"
-        f"📡 *WAN1 (pppoe-out1):*
-"
-        f"   ⬇️ {fmt_bytes(rx1)}  ⬆️ {fmt_bytes(tx1)}
-
-"
-        f"📡 *WAN2 (pppoe-out2):*
-"
-        f"   ⬇️ {fmt_bytes(rx2)}  ⬆️ {fmt_bytes(tx2)}
-
-"
-        f"{'━'*25}
-"
-        f"📊 *الإجمالي (intr1):*
-"
-        f"   ⬇️ التحميل: *{fmt_bytes(rx_t)}*
-"
-        f"   ⬆️ الرفع: *{fmt_bytes(tx_t)}*
-"
-        f"   📦 المجموع: *{fmt_bytes(rx_t+tx_t)}*"
-    )
+    sep = "━" * 25
+    msg = "🌐 *حالة الخطوط*\n" + sep + "\n\n"
+    msg += "📡 *WAN1 (pppoe-out1):*\n"
+    msg += "   ⬇️ " + fmt_bytes(rx1) + "  ⬆️ " + fmt_bytes(tx1) + "\n\n"
+    msg += "📡 *WAN2 (pppoe-out2):*\n"
+    msg += "   ⬇️ " + fmt_bytes(rx2) + "  ⬆️ " + fmt_bytes(tx2) + "\n\n"
+    msg += sep + "\n"
+    msg += "📊 *الاجمالي (intr1):*\n"
+    msg += "   ⬇️ التحميل: *" + fmt_bytes(rx_t) + "*\n"
+    msg += "   ⬆️ الرفع: *" + fmt_bytes(tx_t) + "*\n"
+    msg += "   📦 المجموع: *" + fmt_bytes(rx_t+tx_t) + "*"
     send(msg)
 
 
-# ══════════════════════════════════════════
-#  حساب المبيعات والأرباح
-# ══════════════════════════════════════════
 def calc_sales_report(sold):
     total_cards    = 0
     total_revenue  = 0
