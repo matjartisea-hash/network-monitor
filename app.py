@@ -965,5 +965,6 @@ send(f"🚀 *النظام يعمل*\n\n"
      f"📊 جاهز لاستقبال إحصائيات المايكروتك\n"
      f"🕒 {datetime.now().strftime('%Y-%m-%d %I:%M:%S %p')}")
 
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
