@@ -1,70 +1,102 @@
-import os, sqlite3, logging, requests, threading
+import os, logging, requests, threading
 from datetime import datetime, timedelta
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
 
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN",   "8583886234:AAEPcKBCyH0823cO4WYXc9dx0CObYfbo2Zs")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1995981496")
 WEBHOOK_SECRET   = os.getenv("WEBHOOK_SECRET",   "mysecret123")
 PORT             = int(os.getenv("PORT", 5000))
-DB_FILE          = "/tmp/monitor.db"
+
+SUPABASE_URL     = os.getenv("SUPABASE_URL",     "https://rlkoxhtayeylugxqynna.supabase.co")
+SUPABASE_KEY     = os.getenv("SUPABASE_KEY",     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJsa294aHRheWV5bHVneHF5bm5hIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM3NzQyNTcsImV4cCI6MjA4OTM1MDI1N30.f2AWuKUwWnEkYVlcgLxuMX2MvbBa0zMwZB8rl4RNr3w")
+
+HIGH_OUTAGE_THRESHOLD = 5
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
 # ══════════════════════════════════════════
-#  قاعدة البيانات
+#  Supabase REST API
 # ══════════════════════════════════════════
-def get_db():
-    c = sqlite3.connect(DB_FILE, check_same_thread=False)
-    c.row_factory = sqlite3.Row
-    return c
+def sb_headers():
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": "Bearer " + SUPABASE_KEY,
+        "Content-Type": "application/json",
+        "Prefer": "return=representation"
+    }
+
+def sb_get(table, params=""):
+    url = SUPABASE_URL + "/rest/v1/" + table + "?" + params
+    r = requests.get(url, headers=sb_headers(), timeout=10)
+    return r.json() if r.ok else []
+
+def sb_post(table, data):
+    url = SUPABASE_URL + "/rest/v1/" + table
+    r = requests.post(url, headers=sb_headers(), json=data, timeout=10)
+    return r.json() if r.ok else None
+
+def sb_patch(table, params, data):
+    url = SUPABASE_URL + "/rest/v1/" + table + "?" + params
+    r = requests.patch(url, headers=sb_headers(), json=data, timeout=10)
+    return r.ok
+
+def sb_delete(table, params):
+    url = SUPABASE_URL + "/rest/v1/" + table + "?" + params
+    r = requests.delete(url, headers=sb_headers(), timeout=10)
+    return r.ok
 
 def init_db():
-    db = get_db()
-    db.executescript("""
-        CREATE TABLE IF NOT EXISTS devices (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            name       TEXT    NOT NULL UNIQUE,
-            ip         TEXT    NOT NULL DEFAULT '',
-            location   TEXT    NOT NULL DEFAULT '',
-            group_name TEXT    NOT NULL DEFAULT 'عام',
-            added_at   TEXT    NOT NULL,
-            active     INTEGER NOT NULL DEFAULT 1
-        );
-        CREATE TABLE IF NOT EXISTS outages (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            device       TEXT NOT NULL,
-            ip           TEXT NOT NULL DEFAULT '',
-            started_at   TEXT NOT NULL,
-            ended_at     TEXT,
-            duration_sec INTEGER,
-            resolved     INTEGER DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS events (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            device     TEXT NOT NULL,
-            event      TEXT NOT NULL,
-            message    TEXT,
-            ip         TEXT DEFAULT '',
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS notes (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            device     TEXT NOT NULL,
-            note       TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-    """)
-    db.commit()
-    db.close()
+    """إنشاء الجداول في Supabase عبر SQL"""
+    sql = """
+    CREATE TABLE IF NOT EXISTS devices (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        ip TEXT NOT NULL DEFAULT '',
+        location TEXT NOT NULL DEFAULT '',
+        group_name TEXT NOT NULL DEFAULT 'عام',
+        added_at TEXT NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1
+    );
+    CREATE TABLE IF NOT EXISTS outages (
+        id SERIAL PRIMARY KEY,
+        device TEXT NOT NULL,
+        ip TEXT NOT NULL DEFAULT '',
+        started_at TEXT NOT NULL,
+        ended_at TEXT,
+        duration_sec INTEGER,
+        resolved INTEGER DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS events (
+        id SERIAL PRIMARY KEY,
+        device TEXT NOT NULL,
+        event TEXT NOT NULL,
+        message TEXT,
+        ip TEXT DEFAULT '',
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS notes (
+        id SERIAL PRIMARY KEY,
+        device TEXT NOT NULL,
+        note TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    """
+    url = SUPABASE_URL + "/rest/v1/rpc/exec_sql"
+    # نتحقق من الاتصال فقط
+    r = requests.get(SUPABASE_URL + "/rest/v1/devices?limit=1", headers=sb_headers(), timeout=10)
+    if r.status_code == 200:
+        logging.info("Supabase متصل")
+    else:
+        logging.warning("Supabase: " + str(r.status_code))
 
 
 # ══════════════════════════════════════════
 #  دوال مساعدة
 # ══════════════════════════════════════════
 def _now(): return datetime.now().isoformat(timespec='seconds')
-def _dt(s): return datetime.fromisoformat(s)
+def _dt(s): return datetime.fromisoformat(s.replace("Z",""))
 
 def fmt_dur(secs):
     if not secs or secs < 0: return "—"
@@ -95,89 +127,73 @@ def send(text):
 #  إدارة الأجهزة
 # ══════════════════════════════════════════
 def ensure_device(name, ip="", location="", group="عام"):
-    db = get_db()
-    row = db.execute("SELECT id,ip FROM devices WHERE name=?", (name,)).fetchone()
-    if not row:
-        db.execute(
-            "INSERT INTO devices (name,ip,location,group_name,added_at) VALUES (?,?,?,?,?)",
-            (name, ip, location, group, _now())
-        )
-        db.commit()
-        db.close()
+    rows = sb_get("devices", "name=eq." + name + "&limit=1")
+    if not rows:
+        sb_post("devices", {
+            "name": name, "ip": ip,
+            "location": location, "group_name": group,
+            "added_at": _now(), "active": 1
+        })
         send("📱 *جهاز جديد اضيف تلقائياً!*\n\n🔖 *" + name + "*\n🌐 `" + (ip or "—") + "`\n📍 " + (location or "غير محدد"))
-    else:
-        if ip and not row["ip"]:
-            db.execute("UPDATE devices SET ip=? WHERE name=?", (ip, name))
-            db.commit()
-        db.close()
+    elif ip and not rows[0].get("ip"):
+        sb_patch("devices", "name=eq." + name, {"ip": ip})
 
 def get_all_devices():
-    db = get_db()
-    rows = db.execute("SELECT * FROM devices WHERE active=1 ORDER BY name").fetchall()
-    db.close()
-    return rows
+    return sb_get("devices", "active=eq.1&order=name")
 
 def get_device(name):
-    db = get_db()
-    row = db.execute("SELECT * FROM devices WHERE name=?", (name,)).fetchone()
-    db.close()
-    return row
+    rows = sb_get("devices", "name=eq." + name + "&limit=1")
+    return rows[0] if rows else None
 
 def db_open_outage(device, ip):
-    db = get_db()
-    if not db.execute("SELECT id FROM outages WHERE device=? AND resolved=0", (device,)).fetchone():
-        db.execute("INSERT INTO outages (device,ip,started_at) VALUES (?,?,?)", (device, ip, _now()))
-        db.commit()
-    db.close()
+    existing = sb_get("outages", "device=eq." + device + "&resolved=eq.0&limit=1")
+    if not existing:
+        sb_post("outages", {
+            "device": device, "ip": ip,
+            "started_at": _now(), "resolved": 0
+        })
 
 def db_close_outage(device):
-    db = get_db()
-    row = db.execute("SELECT id,started_at FROM outages WHERE device=? AND resolved=0", (device,)).fetchone()
-    if not row:
-        db.close(); return None
-    ended = _now()
-    secs  = int((_dt(ended) - _dt(row["started_at"])).total_seconds())
-    db.execute("UPDATE outages SET ended_at=?,duration_sec=?,resolved=1 WHERE id=?", (ended, secs, row["id"]))
-    db.commit(); db.close()
+    rows = sb_get("outages", "device=eq." + device + "&resolved=eq.0&limit=1")
+    if not rows: return None
+    row    = rows[0]
+    ended  = _now()
+    secs   = int((_dt(ended) - _dt(row["started_at"])).total_seconds())
+    sb_patch("outages", "id=eq." + str(row["id"]), {
+        "ended_at": ended, "duration_sec": secs, "resolved": 1
+    })
     return secs
 
 def db_log_event(device, event, message="", ip=""):
-    db = get_db()
-    db.execute("INSERT INTO events (device,event,message,ip,created_at) VALUES (?,?,?,?,?)",
-               (device, event, message, ip, _now()))
-    db.commit(); db.close()
+    sb_post("events", {
+        "device": device, "event": event,
+        "message": message, "ip": ip, "created_at": _now()
+    })
 
 def db_count_outages(device, since_dt):
-    db = get_db()
-    n = db.execute("SELECT COUNT(*) FROM outages WHERE device=? AND started_at>=?",
-                   (device, since_dt.isoformat())).fetchone()[0]
-    db.close(); return n
+    rows = sb_get("outages", "device=eq." + device + "&started_at=gte." + since_dt.isoformat() + "&select=id")
+    return len(rows)
 
 def db_top_outages(since_dt, limit=10):
-    db = get_db()
-    rows = db.execute(
-        "SELECT device,COUNT(*) c FROM outages WHERE started_at>=? GROUP BY device ORDER BY c DESC LIMIT ?",
-        (since_dt.isoformat(), limit)
-    ).fetchall()
-    db.close(); return rows
+    rows = sb_get("outages", "started_at=gte." + since_dt.isoformat() + "&select=device")
+    counts = {}
+    for r in rows:
+        d = r["device"]
+        counts[d] = counts.get(d, 0) + 1
+    sorted_counts = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:limit]
+    return [{"device": d, "c": c} for d, c in sorted_counts]
 
 def db_active_outages():
-    db = get_db()
-    rows = db.execute("SELECT device,ip,started_at FROM outages WHERE resolved=0 ORDER BY started_at").fetchall()
-    db.close(); return rows
+    return sb_get("outages", "resolved=eq.0&order=started_at")
 
 def db_avg_duration(device, since_dt):
-    db = get_db()
-    row = db.execute(
-        "SELECT AVG(duration_sec) FROM outages WHERE device=? AND started_at>=? AND resolved=1",
-        (device, since_dt.isoformat())
-    ).fetchone()
-    db.close(); return row[0] or 0
+    rows = sb_get("outages", "device=eq." + device + "&started_at=gte." + since_dt.isoformat() + "&resolved=eq.1&select=duration_sec")
+    if not rows: return 0
+    vals = [r["duration_sec"] for r in rows if r.get("duration_sec")]
+    return sum(vals)/len(vals) if vals else 0
 
 def db_add_note(device, note):
-    db = get_db()
-    db.execute("INSERT INTO notes (device,note,created_at) VALUES (?,?,?)", (device, note, _now()))
-    db.commit(); db.close()
+    sb_post("notes", {"device": device, "note": note, "created_at": _now()})
 
 
 # ══════════════════════════════════════════
@@ -188,10 +204,9 @@ def report_daily():
     devices = get_all_devices()
     active  = {r["device"] for r in db_active_outages()}
     total   = 0
-    today   = datetime.now().strftime('%Y-%m-%d')
     sep     = "─" * 25
 
-    msg = "📊 *تقرير الشبكة اليوم*\n📅 " + today + "\n" + sep + "\n\n"
+    msg = "📊 *تقرير الشبكة اليوم*\n📅 " + datetime.now().strftime('%Y-%m-%d') + "\n" + sep + "\n\n"
     for d in devices:
         n   = d["name"]
         c   = db_count_outages(n, since)
@@ -199,12 +214,12 @@ def report_daily():
         total += c
         icon  = "🔴" if n in active else "🟢"
         msg  += icon + " *" + n + "*"
-        if d["location"]: msg += "  _" + d["location"] + "_"
+        if d.get("location"): msg += "  _" + d["location"] + "_"
         msg  += "\n   ⚡ انقطاعات: *" + str(c) + "*"
         if avg > 0: msg += "  |  ⏱ متوسط: " + fmt_dur(avg)
         msg  += "\n\n"
 
-    msg += "📈 اجمالي الانقطاعات: *" + str(total) + "*\n"
+    msg += "📈 اجمالي: *" + str(total) + "* انقطاع\n"
 
     al = db_active_outages()
     if al:
@@ -276,7 +291,7 @@ def report_active():
 def _check_high_outages(since):
     for row in db_top_outages(since, limit=5):
         if row["c"] >= HIGH_OUTAGE_THRESHOLD:
-            send("⚠️ *تحذير: جهاز يعاني من مشكلة متكررة!*\n\n📡 *" + row["device"] + "*\n⚡ انقطع *" + str(row["c"]) + "* مرات خلال آخر 24 ساعة\n🔧 يُنصح بمراجعة الجهاز")
+            send("⚠️ *تحذير: جهاز يعاني من مشكلة متكررة!*\n\n📡 *" + row["device"] + "*\n⚡ انقطع *" + str(row["c"]) + "* مرات خلال آخر 24 ساعة")
 
 
 # ══════════════════════════════════════════
@@ -294,12 +309,12 @@ def handle_bot(update):
                  "📋 *الأوامر:*\n"
                  "🔹 /status — حالة الأجهزة الآن\n"
                  "🔹 /outages — الأجهزة المتوقفة\n"
-                 "🔹 /devices — قائمة كل الأجهزة\n"
+                 "🔹 /devices — قائمة الأجهزة\n"
                  "🔹 /stats — احصائيات سريعة\n"
                  "🔹 /daily — تقرير اليوم\n"
                  "🔹 /weekly — تقرير الأسبوع\n"
                  "🔹 /monthly — تقرير الشهر\n"
-                 "🔹 /note جهاز ملاحظة — اضافة ملاحظة")
+                 "🔹 /note جهاز ملاحظة")
 
         elif cmd == "status":
             devices = get_all_devices()
@@ -308,7 +323,7 @@ def handle_bot(update):
             if not devices: msg += "لا يوجد أجهزة بعد ⏳"
             for d in devices:
                 icon = "🔴" if d["name"] in active else "🟢"
-                msg += icon + " *" + d["name"] + "*  `" + (d["ip"] or "—") + "`\n"
+                msg += icon + " *" + d["name"] + "*  `" + (d.get("ip") or "—") + "`\n"
             send(msg)
 
         elif cmd == "outages":  report_active()
@@ -320,13 +335,11 @@ def handle_bot(update):
             devices = get_all_devices()
             msg     = "📋 *قائمة الأجهزة (" + str(len(devices)) + "):*\n\n"
             groups  = {}
-            for d in devices: groups.setdefault(d["group_name"], []).append(d)
+            for d in devices: groups.setdefault(d.get("group_name","عام"), []).append(d)
             for g, devs in groups.items():
                 msg += "🗂 *" + g + "*\n"
                 for d in devs:
-                    msg += "   • *" + d["name"] + "*  `" + (d["ip"] or "—") + "`"
-                    if d["location"]: msg += "  _" + d["location"] + "_"
-                    msg += "\n"
+                    msg += "   • *" + d["name"] + "*  `" + (d.get("ip") or "—") + "`\n"
                 msg += "\n"
             send(msg)
 
@@ -418,21 +431,21 @@ def build_dashboard():
         status = "down" if is_down else "up"
         badge  = "🔴 منقطع" if is_down else "🟢 متصل"
         dur_html = '<div class="dur">⏱ منذ ' + dur + '</div>' if is_down else ""
-        loc_html = '<div class="ip">📍 ' + d["location"] + '</div>' if d["location"] else ""
+        loc_html = '<div class="ip">📍 ' + d.get("location","") + '</div>' if d.get("location") else ""
         cards += '<div class="card ' + status + '"><div class="name">📡 ' + name + '</div>'
-        cards += '<div class="ip">🌐 ' + (d["ip"] or "—") + '</div>'
+        cards += '<div class="ip">🌐 ' + (d.get("ip") or "—") + '</div>'
         cards += loc_html
         cards += '<span class="badge ' + status + '">' + badge + '</span>' + dur_html + '</div>'
 
     total = len(devices)
     if not devices:
-        cards = '<div class="empty">لا يوجد أجهزة بعد — ستُضاف تلقائياً عند أول اشعار من Dude</div>'
+        cards = '<div class="empty">لا يوجد أجهزة بعد</div>'
 
-    html = HTML.replace("NOW", datetime.now().strftime("%I:%M:%S %p"))
-    html = html.replace("TOTAL", str(total))
-    html = html.replace("UPCOUNT", str(total - down_cnt))
-    html = html.replace("DOWNCOUNT", str(down_cnt))
-    html = html.replace("CARDS", cards)
+    html = HTML.replace("NOW",      datetime.now().strftime("%I:%M:%S %p"))
+    html = html.replace("TOTAL",    str(total))
+    html = html.replace("UPCOUNT",  str(total - down_cnt))
+    html = html.replace("DOWNCOUNT",str(down_cnt))
+    html = html.replace("CARDS",    cards)
     return html
 
 
@@ -443,7 +456,6 @@ app = Flask(__name__)
 
 @app.route("/")
 def dashboard():
-    init_db()
     return build_dashboard()
 
 @app.route("/webhook", methods=["POST","GET"])
@@ -482,15 +494,16 @@ def webhook():
     ensure_device(device, ip, location, group)
     db_log_event(device, event, message, ip)
     d       = get_device(device)
-    dev_ip  = ip or (d["ip"] if d else "—")
-    dev_loc = location or (d["location"] if d else "—")
+    dev_ip  = ip or (d.get("ip") if d else "—")
+    dev_loc = location or (d.get("location") if d else "—")
 
     if event == "down":
         db_open_outage(device, dev_ip)
         send("🚨 *انقطاع!*\n\n📡 *" + device + "*  |  `" + dev_ip + "`\n📍 " + (dev_loc or "—") + "\n💬 " + (message or "Link Down") + "\n🕒 " + datetime.now().strftime('%I:%M:%S %p'))
     else:
         secs = db_close_outage(device)
-        send("✅ *عاد للاتصال!*\n\n📡 *" + device + "*  |  `" + dev_ip + "`\n📍 " + (dev_loc or "—") + "\n⏱ مدة الانقطاع: *" + fmt_dur(secs) + "*\n🕒 " + datetime.now().strftime('%I:%M:%S %p'))
+        if secs is not None:
+            send("✅ *عاد للاتصال!*\n\n📡 *" + device + "*  |  `" + dev_ip + "`\n📍 " + (dev_loc or "—") + "\n⏱ مدة الانقطاع: *" + fmt_dur(secs) + "*\n🕒 " + datetime.now().strftime('%I:%M:%S %p'))
 
     return jsonify({"ok": True})
 
@@ -512,15 +525,6 @@ def setup_webhook():
 def ping():
     return "ok", 200
 
-@app.route("/api/devices")
-def api_devices():
-    devices = get_all_devices()
-    active  = {r["device"] for r in db_active_outages()}
-    return jsonify([{
-        "name": d["name"], "ip": d["ip"],
-        "status": "down" if d["name"] in active else "up"
-    } for d in devices])
-
 
 # ══════════════════════════════════════════
 #  التشغيل
@@ -533,7 +537,10 @@ scheduler.add_job(report_weekly,  'cron', day_of_week='fri', hour=9, minute=0)
 scheduler.add_job(report_monthly, 'cron', day=1, hour=8, minute=0)
 scheduler.start()
 
-send("🚀 *النظام يعمل على Render.com*\n\n🔗 جاهز لاستقبال اشعارات Dude\n📱 الأجهزة تُضاف تلقائياً\n🕒 " + datetime.now().strftime('%Y-%m-%d %I:%M:%S %p'))
+send("🚀 *النظام يعمل مع Supabase*\n\n"
+     "💾 البيانات محفوظة دائماً\n"
+     "🔗 جاهز لاستقبال اشعارات Dude\n"
+     "🕒 " + datetime.now().strftime('%Y-%m-%d %I:%M:%S %p'))
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
