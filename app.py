@@ -295,6 +295,56 @@ def _check_high_outages(since):
 
 
 # ══════════════════════════════════════════
+#  إحصائيات WAN
+# ══════════════════════════════════════════
+def save_wan_stats(data):
+    row = {
+        "recorded_at": _now(),
+        "rx_ppp1": int(data.get("rx_ppp1", 0)),
+        "tx_ppp1": int(data.get("tx_ppp1", 0)),
+        "rx_ppp2": int(data.get("rx_ppp2", 0)),
+        "tx_ppp2": int(data.get("tx_ppp2", 0)),
+        "rx_total": int(data.get("rx_total", 0)),
+        "tx_total": int(data.get("tx_total", 0)),
+        "rx_live": int(data.get("rx_live", 0)),
+        "tx_live": int(data.get("tx_live", 0)),
+        "tx_net": int(data.get("tx_net", 0)),
+    }
+    sb_post("wan_stats", row)
+
+def get_latest_wan():
+    rows = sb_get("wan_stats", "order=id.desc&limit=1")
+    return rows[0] if rows else None
+
+def fmt_bytes(b):
+    if not b: return "0 B"
+    b = int(b)
+    if b < 1024**2:  return str(round(b/1024, 1)) + " KB"
+    if b < 1024**3:  return str(round(b/1024**2, 1)) + " MB"
+    return str(round(b/1024**3, 2)) + " GB"
+
+def report_wan():
+    s = get_latest_wan()
+    if not s:
+        send("لا توجد بيانات WAN بعد")
+        return
+    sep = "─" * 25
+    msg = "🌐 *حالة الخطوط*" + "\n" + sep + "\n\n"
+    msg += "📡 *WAN1:*\n"
+    msg += "   ⬇️ " + fmt_bytes(s.get("rx_ppp1",0)) + "  ⬆️ " + fmt_bytes(s.get("tx_ppp1",0)) + "\n\n"
+    msg += "📡 *WAN2:*\n"
+    msg += "   ⬇️ " + fmt_bytes(s.get("rx_ppp2",0)) + "  ⬆️ " + fmt_bytes(s.get("tx_ppp2",0)) + "\n\n"
+    msg += sep + "\n"
+    msg += "📊 *الاجمالي:*\n"
+    msg += "   ⬇️ دخول كلي: *" + fmt_bytes(s.get("rx_total",0)) + "*\n"
+    msg += "   ⬆️ خروج بدون بث: *" + fmt_bytes(s.get("tx_net",0)) + "*\n"
+    msg += "   📺 البث المباشر: *" + fmt_bytes(s.get("tx_live",0)) + "*\n"
+    msg += "   📦 خروج كلي: *" + fmt_bytes(s.get("tx_total",0)) + "*\n"
+    msg += "\n🕒 " + str(s.get("recorded_at","—"))
+    send(msg)
+
+
+# ══════════════════════════════════════════
 #  أوامر البوت
 # ══════════════════════════════════════════
 def handle_bot(update):
@@ -314,7 +364,8 @@ def handle_bot(update):
                  "🔹 /daily — تقرير اليوم\n"
                  "🔹 /weekly — تقرير الأسبوع\n"
                  "🔹 /monthly — تقرير الشهر\n"
-                 "🔹 /note جهاز ملاحظة")
+                 "🔹 /note جهاز ملاحظة\n"
+                 "🔹 /wan — حالة الخطوط")
 
         elif cmd == "status":
             devices = get_all_devices()
@@ -505,6 +556,26 @@ def webhook():
         if secs is not None:
             send("✅ *عاد للاتصال!*\n\n📡 *" + device + "*  |  `" + dev_ip + "`\n📍 " + (dev_loc or "—") + "\n⏱ مدة الانقطاع: *" + fmt_dur(secs) + "*\n🕒 " + datetime.now().strftime('%I:%M:%S %p'))
 
+    return jsonify({"ok": True})
+
+@app.route("/stats", methods=["POST","GET"])
+def receive_stats():
+    try:
+        data = request.json or {}
+    except:
+        data = {}
+    if not data:
+        data = request.args.to_dict()
+        data.update(request.form.to_dict())
+    if not data:
+        raw = request.get_data(as_text=True)
+        for item in raw.split("&"):
+            if "=" in item:
+                k, v = item.split("=", 1)
+                data[k.strip()] = v.strip()
+    if data.get("secret") != WEBHOOK_SECRET:
+        return jsonify({"error": "unauthorized"}), 401
+    save_wan_stats(data)
     return jsonify({"ok": True})
 
 @app.route("/tgwebhook", methods=["POST"])
